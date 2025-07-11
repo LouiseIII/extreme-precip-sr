@@ -1,0 +1,809 @@
+---
+title: "Projet : focus on the location Parameter"
+subtitle: |
+  | Modéliser une loi GEV
+#author : "LAST NAME First name"
+#date: "April 09, 2024"
+output: 
+  html_document:
+    theme: cosmo
+    highlight: zenburn
+    toc: true
+    number_sections: true
+    toc_float:
+      collapsed: false
+header-includes:
+  - \usepackage{bm}
+  - \newcommand{\E}{\mathbb{E}}
+  - \newcommand{\R}{\mathbb{R}}
+#bibliography: biblio.bib
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+library(ggplot2)
+library(tidyverse)
+library(readr)
+library(car)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+library(viridisLite)
+library(viridis)
+
+library(ismev)
+library(evd)
+library(boot)
+library(latex2exp)
+library(transport)
+
+library(extRemes)
+
+library(dplyr)
+library(SpatialExtremes)
+library(VGAM)
+library(mgcv)
+library(scoringRules)
+library(evgam)
+library(twosamples)
+
+library(gratia)
+library(future)
+library(furrr)
+```
+
+# MODELS 
+
+Input : 
+  '1_rework/data2_12_rework.csv'
+  '1_rework/dataf2_12_rework.csv'
+  
+Output : 
+  'results_pf12.csv'
+  'results_pp12.csv'
+  'results_pf12_vglm.csv'
+
+The input must be adapted according to the desired output.  
+For example, if the expected output is `'results_ff12.csv'`, then the input should be `data = '1_rework/dataf2_12_rework.csv'`.
+
+```{r, download_data}
+
+setwd("~/Documents/PJTS/ECCE/data")
+data <- read.csv('1_rework/data2_12_rework.csv')
+dataf <- read.csv('1_rework/dataf2_12_rework.csv')
+
+# Train / Validation / Test split
+data_test <- data[data$Test == 1,]
+data_val <- data[data$Val == 1,]
+data_train <- data[data$Test == 0, ]
+data_train <- data_train[data_train$Val == 0, ]
+
+# Optional 
+data_train$dataset <- "Train"
+data_test$dataset <- "Test"
+data_val$dataset <- "Validation"
+
+# Processing base
+data_test <- data_test[ , !(names(data_test) %in% c("TOT_PR"))]
+data_test <- unique(data_test) 
+data_test <- na.omit(data_test)
+
+data_val <- data_val[ , !(names(data_val) %in% c("TOT_PR"))]
+data_val <- unique(data_val)
+data_val <- na.omit(data_val)
+
+data_train0 <- data_train[ , !(names(data_train) %in% c("TOT_PR"))]
+data_train0 <- unique(data_train0)
+data_train0 <- na.omit(data_train0)
+
+data <- data[ , !(names(data) %in% c("TOT_PR"))]
+data <- unique(data)
+data <- na.omit(data)
+
+dataf <- dataf[ , !(names(dataf) %in% c("TOT_PR"))]
+dataf <- unique(dataf)
+dataf <- na.omit(dataf)
+```
+
+
+```{r}
+# ----------------------
+# Model VGLM
+# ----------------------
+
+cm <- list(
+  "(Intercept)" = diag(3), 
+  "alt" = matrix(c(1, 0, 0), nrow = 3),
+  "alt_mean50" = matrix(c(1, 0, 0), nrow = 3),
+  "loc2" = matrix(c(1, 0, 0), nrow = 3),
+  "shape1" = matrix(c(1, 0, 0), nrow = 3),
+  "shape2" = matrix(c(1, 0, 0), nrow = 3),
+  "loc1" = matrix(c(1, 0, 0), nrow = 3),
+  "scale1" = matrix(c(0, 1, 0), nrow = 3),
+  "scale2" = matrix(c(0, 1, 0), nrow = 3)
+)
+
+Model_vglm <- vglm(TOT_PR ~ alt + alt_mean50 + loc1 + loc2 + shape1 + scale1 + scale2 + shape2,
+                   constraints = cm,
+                   family = gev(zero = 3), 
+                   data = data_train,
+                   maxit = 100)
+
+pred_vglm <- predict(Model_vglm, dataf)
+dataf$loc_pred_vglm <- pred_vglm[, 1]
+dataf$scale_pred_vglm <- exp(pred_vglm[, 2])
+dataf$shape_pred_vglm <- exp(pred_vglm[, 3]) - 1/2
+
+dataf <- dataf[, c("rlat", "rlon", "loc_pred_vglm", "scale_pred_vglm", "shape_pred_vglm")]
+
+write.csv(dataf, file = 'results_pf12_vglm.csv', row.names = FALSE)
+```
+
+```{r}
+# ----------------------
+# Model VGAM
+# ----------------------
+
+
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(shape1) + s(alt_mean50))
+formule_scale <- as.formula(~ s(loc1) + s(scale1) + s(scale2))
+
+#formule_mu <- as.formula(TOT_PR ~ s(alt_mean50) + s(loc1) + s(alt) + s(loc2))
+#formule_scale <- as.formula(~ s(alt_mean50) + s(alt))
+
+Model_vgam <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+pred_vgam <- predict(Model_vgam, dataf)
+dataf$loc_pred <- pred_vgam[, 1]
+dataf$scale_pred <- exp(pred_vgam[, 2])
+dataf$shape_pred <- pred_vgam[, 3]
+
+dataf <- dataf[, c("rlat", "rlon", "loc_pred", "scale_pred", "shape_pred")]
+
+write.csv(dataf, file = 'results_pf12.csv', row.names = FALSE)
+```
+
+```{r}
+# Final Model obtained for the resolution 52.8-km
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(alt_std50) + s(alt_mean50))
+formule_scale <- as.formula(~ s(alt) + s(alt_mean50))
+
+m_gev24p <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+``` 
+
+
+# --------
+# SPLINES 
+# --------
+
+```{r}
+param = 2
+nbr = 3
+Model_vgam[[param]]$smooth[[nbr]]$vn
+```
+
+```{r}
+liste_var <- seq(-3, 4, 0.001)
+
+df <- data.frame(scale2 = liste_var,
+                scale2 = rep(0, length(liste_var)),
+                loc2 = rep(0, length(liste_var)))
+
+smooth_1 <- Model_vgam[[param]]$smooth[[nbr]]
+Xu <- smooth_1$Xu
+first_para <- smooth_1$first.para
+last_para <- smooth_1$last.para
+spline_basis <- PredictMat(smooth_1, df)
+coef <- Model_vgam[[param]]$coefficients[first_para:last_para]
+spline_values <- spline_basis %*% coef
+vcov_matrix <- Model_vgam[[param]]$Vp[first_para:last_para, first_para:last_para]
+se_fit <- sqrt(rowSums((spline_basis %*% vcov_matrix) * spline_basis))
+ci_upper <- spline_values + 1.96 * se_fit
+ci_lower <- spline_values - 1.96 * se_fit
+
+spline_data <- data.frame(
+  alt = df$scale2,
+  spline_values = spline_values,
+  ci_upper = ci_upper,
+  ci_lower = ci_lower)
+
+write.csv(spline_data, file = 'splines12_scale_scale2.csv', row.names = FALSE)
+```
+
+# ---------------------------------
+# AIC Contribution (Resolution 12)
+# ---------------------------------
+
+```{r, download_data}
+
+setwd("~/Documents/PJTS/ECCE/data")
+data <- read.csv('1_rework/data2_12_rework.csv')
+
+data_train <- data[data$Test == 0, ]
+data_train <- data_train[data_train$Val == 0, ]
+```
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(shape1) + s(alt_mean50))
+formule_scale <- as.formula(~ s(loc1) + s(scale1) + s(scale2))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(AIC(m_gev_present12))
+liste_param <- c('')
+liste_col <- c('')
+``` 
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(alt) + s(loc2) + s(shape1) + s(alt_mean50))
+formule_scale <- as.formula(~ s(loc1) + s(scale1) + s(scale2))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'loc_loc1')
+liste_param <- c(liste_param, 'mu')
+```
+
+     
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1)  + s(loc2) + s(shape1) + s(alt_mean50))
+formule_scale <- as.formula(~ s(loc1) + s(scale1) + s(scale2))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'loc_alt')
+liste_param <- c(liste_param, 'mu')
+```
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(shape1) + s(alt_mean50))
+formule_scale <- as.formula(~ s(loc1) + s(scale1) + s(scale2))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'loc_loc2')
+liste_param <- c(liste_param, 'mu')
+```
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(alt_mean50))
+formule_scale <- as.formula(~ s(loc1) + s(scale1) + s(scale2))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'loc_shape1')
+liste_param <- c(liste_param, 'mu')
+```
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(shape1))
+formule_scale <- as.formula(~ s(loc1) + s(scale1) + s(scale2))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'loc_alt_mean50')
+liste_param <- c(liste_param, 'mu')
+```
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(shape1) + s(alt_mean50))
+formule_scale <- as.formula(~ s(scale1) + s(scale2))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'scale_loc1')
+liste_param <- c(liste_param, 'scale')
+```
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(shape1) + s(alt_mean50))
+formule_scale <- as.formula(~ s(loc1) + s(scale2))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'scale_scale1')
+liste_param <- c(liste_param, 'scale')
+```
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(shape1) + s(alt_mean50))
+formule_scale <- as.formula(~ s(loc1) + s(scale1) )
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'scale_scale2')
+liste_param <- c(liste_param, 'scale')
+```
+
+```{r}
+df_aic <- data.frame(
+  aic = liste,
+  col = liste_col,
+  param = liste_param)
+
+write.csv(df_aic, file = 'AIC_suivi12.csv', row.names = FALSE)
+```
+
+
+# ---------------------------------
+# AIC Contribution (Resolution 48)
+# ---------------------------------
+
+```{r, download_data}
+
+setwd("~/Documents/PJTS/ECCE/data")
+data <- read.csv('1_rework/data2_48_rework.csv')
+
+data_train <- data[data$Test == 0, ]
+data_train <- data_train[data_train$Val == 0, ]
+```
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(alt_mean50))
+formule_scale <- as.formula(~ s(alt) + s(alt_mean50))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(AIC(m_gev_present12))
+liste_param <- c('')
+liste_col <- c('')
+``` 
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~  s(alt) + s(loc2) + s(alt_mean50))
+formule_scale <- as.formula(~ s(alt) + s(alt_mean50))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'loc_loc1')
+liste_param <- c(liste_param, 'mu')
+```
+
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1)  + s(loc2) + s(alt_mean50))
+formule_scale <- as.formula(~ s(alt) + s(alt_mean50))
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'loc_alt')
+liste_param <- c(liste_param, 'mu')
+```
+
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(alt_mean50))
+formule_scale <- as.formula(~ s(alt) + s(alt_mean50))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'loc_loc2')
+liste_param <- c(liste_param, 'mu')
+```
+
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2))
+formule_scale <- as.formula(~ s(alt) + s(alt_mean50))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'loc_alt_mean50')
+liste_param <- c(liste_param, 'mu')
+```
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(alt_mean50))
+formule_scale <- as.formula(~ s(alt) )
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'scale_alt_mean50')
+liste_param <- c(liste_param, 'scale')
+```
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(alt_mean50))
+formule_scale <- as.formula(~ s(alt_mean50))
+
+m_gev_present12 <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+liste <- c(liste, AIC(m_gev_present12))
+liste_col <- c(liste_col, 'scale_alt')
+liste_param <- c(liste_param, 'scale')
+```
+
+```{r}
+df_aic <- data.frame(
+  aic = liste,
+  col = liste_col,
+  param = liste_param)
+
+write.csv(df_aic, file = 'AIC_suivi48.csv', row.names = FALSE)
+```
+
+# --------------------------------------------------------------------
+# Table of performance (in this section from 12 km trained in present)
+# --------------------------------------------------------------------
+
+```{r, download_data}
+
+# Téléchargement des données 
+setwd("~/Documents/PJTS/ECCE/data")
+data <- read.csv('1_rework/data2_12_rework.csv')
+dataf <- read.csv('1_rework/dataf2_12_rework.csv')
+
+# Train / Validation / Test split
+data_test <- data[data$Test == 1,]
+data_val <- data[data$Val == 1,]
+data_train <- data[data$Test == 0, ]
+data_train <- data_train[data_train$Val == 0, ]
+
+# Processing base
+data_test <- data_test[ , !(names(data_test) %in% c("TOT_PR"))]
+data_test <- unique(data_test) 
+data_test <- na.omit(data_test)
+
+data_val <- data_val[ , !(names(data_val) %in% c("TOT_PR"))]
+data_val <- unique(data_val)
+data_val <- na.omit(data_val)
+
+data_train0 <- data_train[ , !(names(data_train) %in% c("TOT_PR"))]
+data_train0 <- unique(data_train0)
+data_train0 <- na.omit(data_train0)
+
+data <- data[ , !(names(data) %in% c("TOT_PR"))]
+data <- unique(data)
+data <- na.omit(data)
+
+dataf <- dataf[ , !(names(dataf) %in% c("TOT_PR"))]
+dataf <- unique(dataf)
+dataf <- na.omit(dataf)
+```
+
+```{r}
+# ----------------------
+# VGLM
+# ---------------------
+
+cm <- list(
+  "(Intercept)" = diag(3), 
+  "alt" = matrix(c(1, 0, 0), nrow = 3),
+  "alt_mean50" = matrix(c(1, 0, 0), nrow = 3),
+  "loc2" = matrix(c(1, 0, 0), nrow = 3),
+  "shape1" = matrix(c(1, 0, 0), nrow = 3),
+  "shape2" = matrix(c(1, 0, 0), nrow = 3),
+  "loc1" = matrix(c(1, 0, 0), nrow = 3),
+  "scale1" = matrix(c(0, 1, 0), nrow = 3),
+  "scale2" = matrix(c(0, 1, 0), nrow = 3)
+)
+
+# 1) Modèle VGLM avec contraintes
+Model_vglm <- vglm(TOT_PR ~ alt + alt_mean50 + loc1 + loc2 + shape1 + scale1 + scale2 + shape2,
+                   constraints = cm,
+                   family = gev(zero = 3), 
+                   data = data_train,
+                   maxit = 100)
+
+```
+
+```{r}
+# 2) Prédiction pour VGLM
+pred_vglm <- predict(Model_vglm, data_test)
+data_test$loc_pred_vglm <- pred_vglm[, 1]
+data_test$scale_pred_vglm <- exp(pred_vglm[, 2])
+data_test$shape_pred_vglm <- exp(pred_vglm[, 3]) - 1/2
+
+pred_vglm <- predict(Model_vglm, data_val)
+data_val$loc_pred_vglm <- pred_vglm[, 1]
+data_val$scale_pred_vglm <- exp(pred_vglm[, 2])
+data_val$shape_pred_vglm <- exp(pred_vglm[, 3]) - 1/2
+
+pred_vglm <- predict(Model_vglm, data_train0)
+data_train0$loc_pred_vglm <- pred_vglm[, 1]
+data_train0$scale_pred_vglm <- exp(pred_vglm[, 2])
+data_train0$shape_pred_vglm <- exp(pred_vglm[, 3]) - 1/2
+
+pred_vglm <- predict(Model_vglm, dataf)
+dataf$loc_pred_vglm <- pred_vglm[, 1]
+dataf$scale_pred_vglm <- exp(pred_vglm[, 2])
+dataf$shape_pred_vglm <- exp(pred_vglm[, 3]) - 1/2
+
+```
+
+```{r}
+available_cores <- parallel::detectCores()
+workers_to_use <- floor(0.8 * available_cores)
+
+calculate_distances_vglm <- function(data, workers) {
+  plan(multisession, workers = workers)
+  distances <- future_map(1:nrow(data), function(i) {
+    set.seed(i)
+    if (!is.na(data$loc[i])) {
+      samples_gev1 <- rgev(1000, loc = data$loc_pred_vglm[i], scale = data$scale_pred_vglm[i], shape = data$shape_pred_vglm[i])
+      samples_gev2 <- rgev(1000, loc = data$loc[i], scale = data$scale[i], shape = data$shape[i])
+
+      list(
+        distCVM = (1 / (12 * 1000)) + sum(((2 * (1:1000) - 1) / (2 * 1000) - pgev(sort(samples_gev1), loc = data$loc[i], scale = data$scale[i], shape = data$shape[i]))^2),
+        distCVM2 = cvm_test(samples_gev1, samples_gev2, p = 2)[1]
+      )
+    } else {
+      list(distCVM = NA, distCVM2 = NA)
+    }
+  }, .progress = TRUE, .options = furrr_options(seed = TRUE))
+
+  distances_df <- do.call(rbind, distances)
+  distances_df <- apply(distances_df, 2, function(column) unlist(column))
+  distances_df <- as.data.frame(distances_df)
+
+  plan(sequential)
+  gc()
+
+  return(distances_df)
+}
+
+print("Calcul des distances pour Test ...")
+distances_df_vglm <- calculate_distances_vglm(data_test, workers_to_use)
+cat("VGLM Test :", mean(distances_df_vglm$distCVM, na.rm = TRUE), "\n")
+
+print("Calcul des distances pour Validation...")
+distances_df_val_vglm <- calculate_distances_vglm(data_val, workers_to_use)
+cat("VGLM Val :", mean(distances_df_val_vglm$distCVM, na.rm = TRUE), "\n")
+
+print("Calcul des distances pour Train ...")
+distances_df_train_vglm <- calculate_distances_vglm(data_train0, workers_to_use)
+cat("VGLM Train :", mean(distances_df_train_vglm$distCVM, na.rm = TRUE), "\n")
+
+print("Calcul des distances pour Other Climate ...")
+distances_dff_vglm <- calculate_distances_vglm(dataf, workers_to_use)
+cat("VGLM OC :", mean(distances_dff_vglm$distCVM, na.rm = TRUE), "\n")
+
+```
+
+## Code adapted for VGAM
+
+```{r}
+formule_mu <- as.formula(TOT_PR ~ s(loc1) + s(alt) + s(loc2) + s(shape1) + s(alt_mean50))
+formule_scale <- as.formula(~ s(loc1) + s(scale1) + s(scale2))
+
+#formule_mu <- as.formula(TOT_PR ~ s(alt_mean50) + s(loc1) + s(alt) + s(loc2))
+#formule_scale <- as.formula(~ s(alt_mean50) + s(alt))
+
+Model_vgam <- evgam(list(formule_mu, formule_scale , ~ 1), data = data_train, family = "gev")
+
+
+# 2) Prédiction pour VGAM
+pred_vgam <- predict(Model_vgam, data_test)
+data_test$loc_pred_vgam <- pred_vgam[, 1]
+data_test$scale_pred_vgam <- exp(pred_vgam[, 2])
+data_test$shape_pred_vgam <- pred_vgam[, 3]
+
+pred_vgam <- predict(Model_vgam, data_val)
+data_val$loc_pred_vgam <- pred_vgam[, 1]
+data_val$scale_pred_vgam <- exp(pred_vgam[, 2])
+data_val$shape_pred_vgam <- pred_vgam[, 3]
+
+pred_vgam <- predict(Model_vgam, data_train0)
+data_train0$loc_pred_vgam <- pred_vgam[, 1]
+data_train0$scale_pred_vgam <- exp(pred_vgam[, 2])
+data_train0$shape_pred_vgam <- pred_vgam[, 3]
+
+pred_vgam <- predict(Model_vgam, dataf)
+dataf$loc_pred_vgam <- pred_vgam[, 1]
+dataf$scale_pred_vgam <- exp(pred_vgam[, 2])
+dataf$shape_pred_vgam <- pred_vgam[, 3]
+
+```
+
+## Code for the baseline model (distribution parameters obtained from coarse data)
+
+```{r}
+setwd("~/Documents/PJTS/ECCE/data")
+data <- read.csv('1_rework/data2_12_rework.csv')
+data <- data[, !names(data) %in% c('loc1', 'scale1', 'shape1')]
+data_to_merge <- read.csv('1_rework/data2_12.csv')[, c('loc1', 'scale1', 'shape1', 'rlat', 'rlon')]
+data_to_merge <- unique(data_to_merge)
+data <- merge(data, data_to_merge, by = c('rlat', 'rlon'), all.x = TRUE)
+
+dataf <- read.csv('1_rework/dataf2_12_rework.csv')
+dataf <- dataf[, !names(dataf) %in% c('loc1', 'scale1', 'shape1')]
+data_to_merge <- read.csv('1_rework/dataf2_12.csv')[, c('loc1', 'scale1', 'shape1', 'rlat', 'rlon')]
+data_to_merge <- unique(data_to_merge)
+dataf <- merge(dataf, data_to_merge, by = c('rlat', 'rlon'), all.x = TRUE)
+
+
+# Train / Validation / Test split
+data_test <- data[data$Test == 1,]
+data_val <- data[data$Val == 1,]
+data_train <- data[data$Test == 0, ]
+data_train <- data_train[data_train$Val == 0, ]
+
+# Optional 
+data_train$dataset <- "Train"
+data_test$dataset <- "Test"
+data_val$dataset <- "Validation"
+
+# Processing base
+data_test <- data_test[ , !(names(data_test) %in% c("TOT_PR"))]
+data_test <- unique(data_test) 
+data_test <- na.omit(data_test)
+
+data_val <- data_val[ , !(names(data_val) %in% c("TOT_PR"))]
+data_val <- unique(data_val)
+data_val <- na.omit(data_val)
+
+data_train0 <- data_train[ , !(names(data_train) %in% c("TOT_PR"))]
+data_train0 <- unique(data_train0)
+data_train0 <- na.omit(data_train0)
+
+data <- data[ , !(names(data) %in% c("TOT_PR"))]
+data <- unique(data)
+data <- na.omit(data)
+
+dataf <- dataf[ , !(names(dataf) %in% c("TOT_PR"))]
+dataf <- unique(dataf)
+dataf <- na.omit(dataf)
+```
+
+```{r}
+# Baseline
+data_test$loc_pred_base <- data_test$loc1
+data_test$scale_pred_base <- data_test$scale1
+data_test$shape_pred_base <- data_test$shape1
+
+data_val$loc_pred_base <- data_val$loc1
+data_val$scale_pred_base <- data_val$scale1
+data_val$shape_pred_base <- data_val$shape1
+
+data_train0$loc_pred_base <- data_train0$loc1
+data_train0$scale_pred_base <- data_train0$scale1
+data_train0$shape_pred_base <- data_train0$shape1
+
+dataf$loc_pred_base <- dataf$loc1
+dataf$scale_pred_base <- dataf$scale1
+dataf$shape_pred_base <- dataf$shape1
+```
+
+# -----------------------------
+# MODEL SELECTION
+# -----------------------------
+
+Code to adapt for each iteration and selection during results analysis.
+
+
+```{r, selection_with_parallels}
+plan(multisession, workers = parallel::detectCores())
+
+liste_cols_mu <- c('loc1', 'scale1', 'shape1', 'alt_std50', 'alt', 'alt_mean50', 'loc2', 'scale2', 'shape2')
+liste_cols_sigma <- c('loc1', 'scale1', 'shape1', 'alt_std50', 'alt', 'alt_mean50', 'loc2', 'scale2', 'shape2')
+
+
+columns_to_test <- setdiff(colnames(data_train), "TOT_PR")
+n <- nrow(data_test)
+
+process_column <- function(col) {
+  if (col %in% liste_cols_mu) {
+
+    message("Processing column: ", col)
+    
+    # VGAM Model
+    formula_mu <- as.formula(paste0("TOT_PR ~ s(", col, ")"))
+    m_gev <- evgam(list(formula_mu, ~ 1, ~ 1), data = data_train, family = "gev")
+    
+    # Predictions
+    pred <- predict(m_gev, data_test)
+    data_test$loc_pred <- pred[, 1]
+    data_test$scale_pred <- exp(pred[, 2])
+    data_test$shape_pred <- pred[, 3]
+    
+    # ---------------------------------------------------
+    available_cores <- parallel::detectCores()
+    workers_to_use <- floor(0.8 * available_cores)
+    plan(multisession, workers = workers_to_use)
+    # ---------------------------------------------------
+    
+      distances <- future_map(1:nrow(data_test), function(i) {
+        if (!is.na(data_test$loc[i])) {
+          samples_gev1 <- rgev(1000, loc = data_test$loc_pred[i], scale = data_test$scale_pred[i], shape = data_test$shape_pred[i])
+          samples_gev2 <- rgev(1000, loc = data_test$loc[i], scale = data_test$scale[i], shape = data_test$shape[i])
+          
+          list(
+            distCVM = (1 / (12 * 1000)) + sum(((2 * (1:1000) - 1) / (2 * 1000) - pgev(sort(samples_gev1), loc = data_test$loc[i], scale = data_test$scale[i], shape = data_test$shape[i]))^2),
+            distCVM2 = cvm_test(samples_gev1, samples_gev2, p = 2)[1]
+          )
+        } else {
+          list(distCVM = NA, distCVM2 = NA)
+        }
+      }, .progress = TRUE, .options = furrr_options(seed = TRUE))
+      
+  distances_df <- do.call(rbind, distances)
+  distances_df <- apply(distances_df, 2, function(column) unlist(column))
+  distances_df <- as.data.frame(distances_df)
+    message(AIC(m_gev))
+    return(list(
+      col = col,
+      aic = AIC(m_gev),
+      distCVM = mean(distances_df$distCVM, na.rm = TRUE),
+      distCVM2 = mean(distances_df$distCVM2, na.rm = TRUE)
+    ))
+  }
+}
+
+
+
+process_column0 <- function(col) {
+  if (col %in% liste_cols_sigma) {
+    message("Processing column: ", col)
+    
+    # Modèle GEV
+    formula_sigma <- as.formula(paste0("~ s(", col, ")"))
+    m_gev <- evgam(list(TOT_PR ~ 1, formula_sigma, ~ 1), data = data_train, family = "gev")
+    
+    pred <- predict(m_gev, data_test)
+    data_test$loc_pred <- pred[, 1]
+    data_test$scale_pred <- exp(pred[, 2])
+    data_test$shape_pred <- pred[, 3]
+    
+    # ---------------------------------------------------
+    available_cores <- parallel::detectCores()
+    workers_to_use <- floor(0.8 * available_cores)
+    plan(multisession, workers = workers_to_use)
+    # ---------------------------------------------------
+    
+      distances <- future_map(1:nrow(data_test), function(i) {
+        if (!is.na(data_test$loc[i])) {
+          samples_gev1 <- rgev(1000, loc = data_test$loc_pred[i], scale = data_test$scale_pred[i], shape = data_test$shape_pred[i])
+          samples_gev2 <- rgev(1000, loc = data_test$loc[i], scale = data_test$scale[i], shape = data_test$shape[i])
+          
+          list(
+            distCVM = (1 / (12 * 1000)) + sum(((2 * (1:1000) - 1) / (2 * 1000) - pgev(sort(samples_gev1), loc = data_test$loc[i], scale = data_test$scale[i], shape = data_test$shape[i]))^2),
+            distCVM2 = cvm_test(samples_gev1, samples_gev2, p = 2)[1]
+          )
+        } else {
+          list(distCVM = NA, distCVM2 = NA)
+        }
+      }, .progress = TRUE, .options = furrr_options(seed = TRUE))
+  
+  message(AIC(m_gev))
+  # Résumé des métriques
+  distances_df <- do.call(rbind, distances)
+  distances_df <- apply(distances_df, 2, function(column) unlist(column))
+  distances_df <- as.data.frame(distances_df)
+    
+    return(list(
+      col = col,
+      aic = AIC(m_gev),
+      distCVM = mean(distances_df$distCVM, na.rm = TRUE),
+      distCVM2 = mean(distances_df$distCVM2, na.rm = TRUE)
+    ))
+  }
+}
+
+
+results_list <- lapply(columns_to_test, process_column)
+results_list <- do.call(rbind, results_list)
+write.csv(results_list, file = 'loss12_para_1.csv', row.names = FALSE)
+
+results_list0 <- lapply(columns_to_test, process_column0)
+results_list0 <- do.call(rbind, results_list0)
+write.csv(results_list, file = 'loss12_para_11.csv', row.names = FALSE)
+
+plan(sequential) 
+gc()  
+```
+
+
